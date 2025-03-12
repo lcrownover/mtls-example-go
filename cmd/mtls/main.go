@@ -7,35 +7,62 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/lcrownover/mtls-go/internal/ca"
 	"github.com/lcrownover/mtls-go/internal/server"
 )
 
-var basePath = "/var/lib/caravel-go"
+type cliOptions struct {
+	dataPath   string
+	serverName string
+}
+
+func parseEnv() *cliOptions {
+	opts := &cliOptions{
+		dataPath:   "/var/lib/caravel",
+		serverName: "localhost",
+	}
+
+	if v, found := os.LookupEnv("CARAVEL_DATA_PATH"); found {
+		opts.dataPath = v
+	}
+	if v, found := os.LookupEnv("CARAVEL_SERVER_NAME"); found {
+		opts.serverName = v
+	}
+	return opts
+}
 
 func main() {
-	err := server.InitializeServer(basePath)
+	opts := parseEnv()
+
+	err := server.Initialize(opts.dataPath)
 	if err != nil {
 		log.Fatalf("failed to initialize server: %v", err)
 	}
 
-	ca, err := ca.NewCertificateAuthority(basePath, []string{"localhost"})
+	caCert, err := ca.InitializeCA(opts.dataPath, []string{opts.serverName})
 	if err != nil {
 		log.Fatalf("failed to initialize CA: %v", err)
 	}
+
+	caPath := filepath.Join(opts.dataPath, "ca")
+	err = ca.InitializeServerCertificate(caPath, caCert, []string{opts.serverName})
+	if err != nil {
+		log.Fatalf("failed to initialize server certificates: %v", err)
+	}
+	serverCertPath := ca.CACertificatePath(caPath)
+	serverKeyPath := ca.CAKeyPath(caPath)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "hello world")
 	})
 
-	caCert, _ := os.ReadFile("/var/lib/caravel/ca/ca.crt")
 	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
+	caCertPool.AppendCertsFromPEM(caCert.Certificate[0])
 
 	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*ca.ServerKeyPair},
 		ClientCAs:  caCertPool,
 		ClientAuth: tls.RequireAndVerifyClientCert,
 	}
@@ -47,5 +74,5 @@ func main() {
 	}
 
 	fmt.Println("Starting server")
-	log.Fatal(server.ListenAndServeTLS("/var/lib/caravel/ca/server/localhost.crt", "/var/lib/caravel/ca/server/localhost.key"))
+	log.Fatal(server.ListenAndServeTLS(serverCertPath, serverKeyPath))
 }
