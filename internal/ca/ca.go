@@ -240,7 +240,6 @@ func saveCertificate(path string, cert *x509.Certificate) error {
 }
 
 func InitializeServerCertificate(caPath string, caCert *tls.Certificate, hostnames []string) error {
-	serverPath := filepath.Join(caPath, "server")
 	key, err := generatePKCS8PrivateKey()
 	if err != nil {
 		return fmt.Errorf("failed to generate server private key: %v", err)
@@ -260,15 +259,27 @@ func InitializeServerCertificate(caPath string, caCert *tls.Certificate, hostnam
 	if err != nil {
 		return fmt.Errorf("failed to sign server certificate: %v", err)
 	}
-	err = saveCertificate(filepath.Join(serverPath, "server.crt"), cert)
+	err = saveCertificate(ServerCertificatePath(caPath), cert)
 	if err != nil {
 		return fmt.Errorf("failed to save server certificate: %v", err)
 	}
-	err = savePKCS8PrivateKey(filepath.Join(serverPath, "server.key"), key)
+	err = savePKCS8PrivateKey(ServerKeyPath(caPath), key)
 	if err != nil {
 		return fmt.Errorf("failed to save server private key: %v", err)
 	}
 	return nil
+}
+
+func GetPEMBytes(cert *tls.Certificate) ([]byte, error) {
+	pemBlock := &pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.Certificate[0],
+	}
+	if len(pemBlock.Bytes) == 0 {
+		return nil, fmt.Errorf("pem bytes are empty")
+	}
+	pemBytes := pem.EncodeToMemory(pemBlock)
+	return pemBytes, nil
 }
 
 func CAKeyPath(caPath string) string {

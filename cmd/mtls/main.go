@@ -35,32 +35,38 @@ func parseEnv() *cliOptions {
 
 func main() {
 	opts := parseEnv()
+	caPath := filepath.Join(opts.dataPath, "ca")
 
 	err := server.Initialize(opts.dataPath)
 	if err != nil {
 		log.Fatalf("failed to initialize server: %v", err)
 	}
 
+	// initialize the CA dir structure, creates key/cert
 	caCert, err := ca.InitializeCA(opts.dataPath, []string{opts.serverName})
 	if err != nil {
 		log.Fatalf("failed to initialize CA: %v", err)
 	}
 
-	caPath := filepath.Join(opts.dataPath, "ca")
+	// inits the server certificates
 	err = ca.InitializeServerCertificate(caPath, caCert, []string{opts.serverName})
 	if err != nil {
 		log.Fatalf("failed to initialize server certificates: %v", err)
 	}
-	serverCertPath := ca.CACertificatePath(caPath)
-	serverKeyPath := ca.CAKeyPath(caPath)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "hello world")
 	})
 
+	pemBytes, err := ca.GetPEMBytes(caCert)
+	if err != nil {
+		log.Fatalf("failed to encode CA certificate to PEM")
+	}
 	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert.Certificate[0])
+	if ok := caCertPool.AppendCertsFromPEM(pemBytes); !ok {
+		log.Fatalf("failed to append CA certificate")
+	}
 
 	tlsConfig := &tls.Config{
 		ClientCAs:  caCertPool,
@@ -73,6 +79,11 @@ func main() {
 		TLSConfig: tlsConfig,
 	}
 
-	fmt.Println("Starting server")
-	log.Fatal(server.ListenAndServeTLS(serverCertPath, serverKeyPath))
+	fmt.Println("Starting primary server")
+	go func() {
+	log.Fatal(server.ListenAndServeTLS(
+		ca.ServerCertificatePath(caPath),
+		ca.ServerKeyPath(caPath),
+	))
+	}()
 }
