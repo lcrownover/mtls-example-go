@@ -79,11 +79,9 @@ func main() {
 		TLSConfig: tlsConfig,
 	}
 
-	fmt.Println("Starting primary server")
-	go func() {
+	fmt.Println("Starting server")
 	log.Fatal(server.ListenAndServeTLS(
 		ca.ServerCertificatePath(caPath),
 		ca.ServerKeyPath(caPath),
 	))
-	}()
 }
