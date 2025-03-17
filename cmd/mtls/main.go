@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,43 +35,82 @@ func parseEnv() *cliOptions {
 }
 
 func main() {
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 	opts := parseEnv()
 	caPath := filepath.Join(opts.dataPath, "ca")
 
 	err := server.Initialize(opts.dataPath)
 	if err != nil {
-		log.Fatalf("failed to initialize server: %v", err)
+		logger.Error("failed to initialize server", "error", err)
 	}
 
 	// initialize the CA dir structure, creates key/cert
 	caCert, err := ca.InitializeCA(opts.dataPath, []string{opts.serverName})
 	if err != nil {
-		log.Fatalf("failed to initialize CA: %v", err)
+		logger.Error("failed to initialize CA", "error", err)
 	}
 
 	// inits the server certificates
 	err = ca.InitializeServerCertificate(caPath, caCert, []string{opts.serverName})
 	if err != nil {
-		log.Fatalf("failed to initialize server certificates: %v", err)
+		logger.Error("failed to initialize server certificates", "error", err)
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "hello world")
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		psk := r.Header.Get("X-Register-Key")
+		if psk != "letmein" {
+			logger.Info("client tried to register with invalid key", "ip", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		name := r.Header.Get("X-Agent-Name")
+		if name == "" {
+			logger.Info("client tried to register with empty name", "ip", r.RemoteAddr)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		logger.Info("registering new agent", "name", name)
+		fmt.Fprintf(w, "registering new agent: %s\n", name)
+		keypair, err := ca.RegisterAgent(caPath, caCert, name)
+		if err != nil {
+			logger.Error("failed to register new agent", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		certPEM, keyPEM, err := ca.TLSCertToPEM(*keypair)
+		if err != nil {
+			logger.Error("failed to encode keypair to PEM", "error", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintln(w, certPEM)
+		fmt.Fprintln(w, keyPEM)
+	})
+
+	mux.HandleFunc("/secure", func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
+			logger.Info("client tried to connect with invalid cert", "ip", r.RemoteAddr)
+			http.Error(w, "invalid certificate", http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprintln(w, "you made it!")
 	})
 
 	pemBytes, err := ca.GetPEMBytes(caCert)
 	if err != nil {
-		log.Fatalf("failed to encode CA certificate to PEM")
+		logger.Error("failed to encode CA certificate to PEM")
 	}
 	caCertPool := x509.NewCertPool()
 	if ok := caCertPool.AppendCertsFromPEM(pemBytes); !ok {
-		log.Fatalf("failed to append CA certificate")
+		logger.Error("failed to append CA certificate")
 	}
 
 	tlsConfig := &tls.Config{
 		ClientCAs:  caCertPool,
-		ClientAuth: tls.RequireAndVerifyClientCert,
+		ClientAuth: tls.VerifyClientCertIfGiven,
 	}
 
 	server := &http.Server{
@@ -80,8 +120,7 @@ func main() {
 	}
 
 	fmt.Println("Starting server")
-	log.Fatal(server.ListenAndServeTLS(
-		ca.ServerCertificatePath(caPath),
-		ca.ServerKeyPath(caPath),
-	))
+	if err := server.ListenAndServeTLS(ca.ServerCertificatePath(caPath), ca.ServerKeyPath(caPath)); err != nil {
+		logger.Error("failed to start server", "error", err)
+	}
 }

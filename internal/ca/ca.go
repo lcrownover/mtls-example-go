@@ -240,6 +240,9 @@ func saveCertificate(path string, cert *x509.Certificate) error {
 }
 
 func InitializeServerCertificate(caPath string, caCert *tls.Certificate, hostnames []string) error {
+	if serverCertificateExists(caPath) && serverKeyExists(caPath) {
+		return nil
+	}
 	key, err := generatePKCS8PrivateKey()
 	if err != nil {
 		return fmt.Errorf("failed to generate server private key: %v", err)
@@ -270,6 +273,48 @@ func InitializeServerCertificate(caPath string, caCert *tls.Certificate, hostnam
 	return nil
 }
 
+func RegisterAgent(caPath string, caCert *tls.Certificate, hostname string) (*tls.Certificate, error) {
+	if agentCertificateExists(caPath, hostname) && agentKeyExists(caPath, hostname) {
+		keypair, err := tls.LoadX509KeyPair(AgentCertificatePath(caPath, hostname), AgentKeyPath(caPath, hostname))
+		if err != nil {
+			return nil, fmt.Errorf("failed to load existing agent certificate: %v", err)
+		}
+		return &keypair, nil
+	}
+	key, err := generatePKCS8PrivateKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate agent private key: %v", err)
+	}
+	t, err := generateCertificateTemplate(false, []string{hostname})
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate agent certificate: %v", err)
+	}
+
+	cax509Cert, err := x509.ParseCertificate(caCert.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse x509 certificate from ca certificate: %v", err)
+	}
+	caPrivateKey := caCert.PrivateKey.(*rsa.PrivateKey)
+
+	cert, err := signCertificateTemplate(t, cax509Cert, key, caPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign agent certificate: %v", err)
+	}
+	err = saveCertificate(AgentCertificatePath(caPath, hostname), cert)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save agent certificate: %v", err)
+	}
+	err = savePKCS8PrivateKey(AgentKeyPath(caPath, hostname), key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save agent private key: %v", err)
+	}
+	keypair, err := tls.LoadX509KeyPair(AgentCertificatePath(caPath, hostname), AgentKeyPath(caPath, hostname))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load agent certificate: %v", err)
+	}
+	return &keypair, nil
+}
+
 func GetPEMBytes(cert *tls.Certificate) ([]byte, error) {
 	pemBlock := &pem.Block{
 		Type:  "CERTIFICATE",
@@ -295,12 +340,66 @@ func ServerCertificatePath(caPath string) string {
 func ServerKeyPath(caPath string) string {
 	return filepath.Join(caPath, "server", "server.key")
 }
-
+func serverCertificateExists(caPath string) bool {
+	if _, err := os.Stat(ServerCertificatePath(caPath)); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+func serverKeyExists(caPath string) bool {
+	if _, err := os.Stat(ServerKeyPath(caPath)); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
 func AgentCertificatePath(caPath, agentName string) string {
 	return filepath.Join(caPath, "agents", fmt.Sprintf("%s.crt", agentName))
 }
 func AgentKeyPath(caPath, agentName string) string {
 	return filepath.Join(caPath, "agents", fmt.Sprintf("%s.key", agentName))
+}
+func agentCertificateExists(caPath string, hostname string) bool {
+	if _, err := os.Stat(AgentCertificatePath(caPath, hostname)); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+func agentKeyExists(caPath string, hostname string) bool {
+	if _, err := os.Stat(AgentKeyPath(caPath, hostname)); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+// tlsCertToPEM converts a tls.Certificate into two PEM-encoded strings:
+// one for the certificate chain and one for the RSA private key.
+func TLSCertToPEM(cert tls.Certificate) (certPEM, keyPEM string, err error) {
+	// Convert each DER-encoded certificate in the chain to PEM.
+	for _, derBytes := range cert.Certificate {
+		block := &pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: derBytes,
+		}
+		certPEM += string(pem.EncodeToMemory(block))
+	}
+
+	// Assert that the private key is of type *rsa.PrivateKey.
+	rsaKey, ok := cert.PrivateKey.(*rsa.PrivateKey)
+	if !ok {
+		return "", "", fmt.Errorf("private key is not an RSA key")
+	}
+
+	// Convert the RSA private key to PEM.
+	keyBytes, err := x509.MarshalPKCS8PrivateKey(rsaKey)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to unmarshal pkcs8 private key: %v", err)
+	}
+	keyBlock := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: keyBytes,
+	}
+	keyPEM = string(pem.EncodeToMemory(keyBlock))
+	return certPEM, keyPEM, nil
 }
 
 // func generateServerCertificate(ca *CertificateAuthority) (*tls.Certificate, error) {
